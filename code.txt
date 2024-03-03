@@ -1,0 +1,135 @@
+#include "esp_camera.h"
+#include <WiFi.h>
+#include <base64.h>
+#include <Firebase_ESP_Client.h>
+
+const char *ssid = "Gsoft";
+const char *password = "amirrahiii";
+
+#define API_KEY "AIzaSyBn6JN3IH68U_elgi9pgYAdPEO6659FKiM"
+#define DATABASE_URL "https://nodemcu-gpstracker-default-rtdb.firebaseio.com/"
+
+FirebaseData fbdo;
+FirebaseAuth auth;
+FirebaseConfig config;
+
+bool signupOK = false;
+String lastStoredImage;
+
+void initCamera() {
+  camera_config_t config;
+  config.ledc_channel = LEDC_CHANNEL_0;
+  config.ledc_timer = LEDC_TIMER_0;
+  config.pin_d0 = GPIO_NUM_5;
+  config.pin_d1 = GPIO_NUM_18;
+  config.pin_d2 = GPIO_NUM_19;
+  config.pin_d3 = GPIO_NUM_21;
+  config.pin_d4 = GPIO_NUM_36;
+  config.pin_d5 = GPIO_NUM_39;
+  config.pin_d6 = GPIO_NUM_34;
+  config.pin_d7 = GPIO_NUM_35;
+  config.pin_xclk = GPIO_NUM_0;
+  config.pin_pclk = GPIO_NUM_22;
+  config.pin_vsync = GPIO_NUM_25;
+  config.pin_href = GPIO_NUM_23;
+  config.pin_sscb_sda = GPIO_NUM_26;
+  config.pin_sscb_scl = GPIO_NUM_27;
+  config.pin_pwdn = GPIO_NUM_32;
+  config.pin_reset = GPIO_NUM_33;
+  config.xclk_freq_hz = 20000000;
+  config.pixel_format = PIXFORMAT_JPEG;
+  config.frame_size = FRAMESIZE_UXGA;
+  config.jpeg_quality = 12;
+  config.fb_count = 1;
+
+  esp_err_t err = esp_camera_init(&config);
+  if (err != ESP_OK) {
+    Serial.printf("Camera init failed with error 0x%x", err);
+    return;
+  }
+}
+
+void tokenStatusCallback(token_info_t tokenInfo) {
+  Serial.println(tokenInfo.status ? "Token is ready" : "Token has expired");
+}
+
+String captureAndEncodeImage() {
+  camera_fb_t *fb = esp_camera_fb_get();
+  if (!fb) {
+    Serial.println("Error capturing image");
+    return "";
+  }
+
+  String base64Image = base64::encode(fb->buf, fb->len);
+
+  esp_camera_fb_return(fb);
+
+  return base64Image;
+}
+
+bool isSameImage(const String &currentImage) {
+  return currentImage.equals(lastStoredImage);
+}
+
+void setup() {
+  Serial.begin(115200);
+
+  WiFi.begin(ssid, password);
+  while (WiFi.status() != WL_CONNECTED) {
+    delay(1000);
+    Serial.println("Connecting to WiFi...");
+  }
+  Serial.println("Connected to WiFi");
+
+  initCamera();
+
+  config.api_key = API_KEY;
+  config.database_url = DATABASE_URL;
+
+  if (Firebase.signUp(&config, &auth, "", "")) {
+    Serial.println("Firebase Sign Up Successful");
+    signupOK = true;
+  } else {
+    Serial.printf("Firebase Sign Up Failed. Error: %s\n", config.signer.signupError.message.c_str());
+  }
+
+  config.token_status_callback = tokenStatusCallback;
+  Firebase.begin(&config, &auth);
+  Firebase.reconnectWiFi(true);
+}
+
+void loop() {
+  delay(3000);
+
+  String imageBase64 = captureAndEncodeImage();
+
+  if (!imageBase64.isEmpty() && !isSameImage(imageBase64)) {
+    Serial.println("Image captured and encoded successfully!");
+    Serial.println("Base64 Image Size: " + String(imageBase64.length()));
+
+    // Save the Base64 image to Firebase with retry
+    const int maxRetry = 5;
+    int retryCount = 0;
+
+    while (retryCount < maxRetry) {
+      if (Firebase.RTDB.setString(&fbdo, "images/image_data", imageBase64.c_str())) {
+        Serial.println("Image data saved to Firebase successfully.");
+        lastStoredImage = imageBase64;  // Update last stored image
+        break;  // Exit the loop on success
+      } else {
+        retryCount++;
+        Serial.println("Failed to save image data to Firebase. Retrying...");
+        Serial.println("HTTP response code: " + String(fbdo.httpCode()));
+        Serial.println("Error: " + fbdo.errorReason());
+        delay(1000);  // Add a delay before retrying
+      }
+    }
+
+    if (retryCount >= maxRetry) {
+      Serial.println("Reached maximum retry attempts. Data may not be saved.");
+    }
+  } else {
+    Serial.println("Error capturing or encoding image");
+  }
+}
+
